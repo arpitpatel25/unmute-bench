@@ -8,13 +8,16 @@
  *
  *   node unmute-bench.mjs                      compare your last 30 days with the 30 before
  *   node unmute-bench.mjs --split 2026-08-10   compare 30 days before vs after a date
- *   node unmute-bench.mjs --card bench.svg     also write a shareable black-and-white card
+ *   node unmute-bench.mjs --card bench.png     also write a shareable black-and-white card
  *   node unmute-bench.mjs --json               machine-readable output
  *
  * Reads only local logs (Claude Code, Codex, and Unmute's index if present).
  * Sends nothing anywhere.
  */
-import { writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import {
   cleanSessions,
   compare,
@@ -69,8 +72,7 @@ function main(): void {
     process.stdout.write(report(result, splitKey, raw.length, dropped))
   }
   if (args.card) {
-    writeFileSync(args.card, card(result))
-    log(`\nShare card written to ${args.card}\n`)
+    log(`\n${writeCard(args.card, card(result))}\n`)
   }
 }
 
@@ -96,7 +98,8 @@ function report(r: BenchComparison, split: string, read: number, dropped: { mach
   out += `  ${p < 0.001 ? 'Statistically significant (p < 0.001)' : p < 0.05 ? `Statistically significant (p = ${p.toFixed(3)})` : `Not statistically significant (p = ${p.toFixed(2)})`}\n`
   out += `  Split date: ${split} · ${read} sessions read · removed ${dropped.bursts} bursts, ${dropped.duplicates} repeats, ${dropped.machineOnly} automated\n`
   if (thin(b) || thin(a)) out += '  Fewer than 5 active days on one side: treat this as a preview, not a result.\n'
-  out += '\n  Method: justunmute.me/bench · Nothing left this machine.\n\n'
+  out += leaderboard(a)
+  out += '\n  Method and leaderboard: justunmute.me/bench · Nothing left this machine.\n\n'
   return out
 }
 
@@ -138,6 +141,65 @@ ${body}
 `
 }
 
+/** Reference rows from the v0.1 leaderboard, so every run shows where the
+ *  person sits. Keep in sync with justunmute.me/bench. */
+const LEADERBOARD: Array<[string, number, number, number]> = [
+  ['Claude Code + Codex, desktop apps', 3, 46, 4.9],
+  ['Claude Code + Codex, via Unmute', 10, 144, 9.4],
+]
+
+function leaderboard(you: BenchMetrics): string {
+  const row = (name: string, s: number, m: number, h: number) =>
+    `  ${name.padEnd(36)} ${String(s).padStart(8)} ${String(m).padStart(9)} ${String(h).padStart(7)}\n`
+  let out = '\n  Where you sit, median per active day (leaderboard v0.1, n=1 per row)\n'
+  out += `  ${''.padEnd(36)} ${'sessions'.padStart(8)} ${'messages'.padStart(9)} ${'hours'.padStart(7)}\n`
+  out += row(`You, ${range(you)}`, you.spd.median, you.mpd.median, you.ahd.median)
+  for (const [name, s, m, h] of LEADERBOARD) out += row(name, s, m, h)
+  return out
+}
+
+/** SVG always; PNG by drawing the SVG in a headless Chrome/Chromium, because
+ *  X and most apps won't take an SVG. */
+function writeCard(path: string, svg: string): string {
+  if (!path.toLowerCase().endsWith('.png')) {
+    writeFileSync(path, svg)
+    return `Share card written to ${path}`
+  }
+  const chrome = findChrome()
+  const fallback = path.replace(/\.png$/i, '.svg')
+  if (!chrome) {
+    writeFileSync(fallback, svg)
+    return `No Chrome or Chromium found, so the card is an SVG: ${fallback} (open it in a browser and screenshot it)`
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'unmute-bench-'))
+  try {
+    const src = join(dir, 'card.svg')
+    writeFileSync(src, svg)
+    const out = resolve(path)
+    spawnSync(chrome, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=2', '--window-size=1200,675', `--screenshot=${out}`, `file://${src}`], { stdio: 'ignore', timeout: 30_000 })
+    if (existsSync(out)) return `Share card written to ${path}`
+    writeFileSync(fallback, svg)
+    return `Could not draw the PNG, so the card is an SVG: ${fallback}`
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+function findChrome(): string | null {
+  const candidates = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  ]
+  for (const c of candidates) if (existsSync(c)) return c
+  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+    const r = spawnSync('which', [name], { encoding: 'utf8' })
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim()
+  }
+  return null
+}
+
 function range(m: BenchMetrics): string {
   const f = (s: string) => new Date(`${s}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   return `${f(m.from)}–${f(m.to)}`
@@ -150,12 +212,12 @@ function fail(msg: string): never { process.stderr.write(`unmute-bench: ${msg}\n
 
 const HELP = `unmute-bench v0.1 — the benchmark that measures the human, not the model
 
-Usage: node unmute-bench.mjs [--split YYYY-MM-DD] [--days N] [--card file.svg] [--json] [--no-index]
+Usage: node unmute-bench.mjs [--split YYYY-MM-DD] [--days N] [--card file.png] [--json] [--no-index]
    or: curl -fsSL https://justunmute.me/unmute-bench.mjs | node --input-type=module - [options]
 
   --split   first day of "after" (default: your first Unmute session, else ${30} days ago)
   --days    length of each window, 7–90 (default 30)
-  --card    write a shareable 1200×675 SVG card
+  --card    write a shareable 1200×675 card (.png needs Chrome or Chromium; .svg always works)
   --json    print machine-readable results
   --no-index  ignore Unmute's session index even if present
 

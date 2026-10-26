@@ -49,7 +49,7 @@ curl -fsSL https://justunmute.me/unmute-bench.mjs -o unmute-bench.mjs
 node unmute-bench.mjs                       # last 30 days vs the 30 before
 node unmute-bench.mjs --split 2026-08-10    # 30 days before vs after a date (e.g. when you switched tools)
 node unmute-bench.mjs --days 14             # shorter windows
-node unmute-bench.mjs --card bench.svg      # shareable black-and-white card (open in a browser to save as PNG)
+node unmute-bench.mjs --card bench.png      # shareable black-and-white card (PNG needs Chrome; use .svg otherwise)
 node unmute-bench.mjs --json                # machine-readable
 ```
 
